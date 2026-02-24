@@ -107,6 +107,7 @@ import httpx
 from datetime import datetime
 
 app = FastAPI(title="VPN Agent")
+
 AGENT_SECRET = os.getenv("AGENT_SECRET")
 CENTRAL_API = os.getenv("CENTRAL_API")
 SERVER_ID = os.getenv("SERVER_ID")
@@ -115,6 +116,7 @@ class AddUser(BaseModel):
     uuid: str
     email: str = ""
 
+# ====================== ЭНДПОИНТЫ ======================
 @app.get("/metrics")
 async def get_metrics(secret: str = Header(..., alias="X-Agent-Secret")):
     if secret != AGENT_SECRET:
@@ -124,25 +126,37 @@ async def get_metrics(secret: str = Header(..., alias="X-Agent-Secret")):
     net = psutil.net_io_counters()
     active = 0
     try:
-        out = subprocess.check_output(["xray", "api", "statsquery", "--name", "inbound>>vless-reality>>users"], text=True, timeout=5)
+        out = subprocess.check_output(
+            ["xray", "api", "statsquery", "--name", "inbound>>vless-reality>>users"],
+            text=True, timeout=5
+        )
         active = len(json.loads(out).get("stat", []))
     except:
         pass
-    return {"cpu": round(cpu,1), "ram": round(ram,1), "network_in_mb": net.bytes_recv//1024//1024, "network_out_mb": net.bytes_sent//1024//1024, "active_users": active}
+    return {
+        "cpu": round(cpu, 1),
+        "ram": round(ram, 1),
+        "network_in_mb": net.bytes_recv // 1024 // 1024,
+        "network_out_mb": net.bytes_sent // 1024 // 1024,
+        "active_users": active
+    }
 
 @app.post("/add_user")
 async def add_user(data: AddUser, secret: str = Header(..., alias="X-Agent-Secret")):
-    if secret != AGENT_SECRET: raise HTTPException(403)
+    if secret != AGENT_SECRET:
+        raise HTTPException(403)
     cmd = f'xray api adduser --inboundTag="vless-reality" --userId="{data.uuid}" --email="{data.email}"'
     subprocess.check_output(cmd, shell=True, timeout=10)
     return {"status": "ok"}
 
 @app.post("/update_reality")
 async def update_reality(secret: str = Header(..., alias="X-Agent-Secret")):
-    if secret != AGENT_SECRET: raise HTTPException(403)
+    if secret != AGENT_SECRET:
+        raise HTTPException(403)
     subprocess.run(["systemctl", "restart", "xray"], check=True)
     return {"status": "reloaded"}
 
+# ====================== ФОНОВАЯ ЗАДАЧА ======================
 async def send_metrics_loop():
     while True:
         try:
@@ -157,9 +171,13 @@ async def send_metrics_loop():
             pass
         await asyncio.sleep(15)
 
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(send_metrics_loop())
+
+# ====================== ЗАПУСК ======================
 if __name__ == "__main__":
     import uvicorn
-    asyncio.create_task(send_metrics_loop())
     uvicorn.run(app, host="127.0.0.1", port=8001)
 EOP
 
