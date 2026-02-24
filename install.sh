@@ -163,7 +163,7 @@ async def send_metrics_loop():
             data = await get_metrics(AGENT_SECRET)
             async with httpx.AsyncClient() as client:
                 await client.post(
-                    f"{CENTRAL_API}/servers/metrics/ingest?server_id={SERVER_ID}",
+                    f"{CENTRAL_API}/api/servers/metrics/ingest?server_id={SERVER_ID}",
                     json=data,
                     headers={"X-Agent-Secret": AGENT_SECRET}
                 )
