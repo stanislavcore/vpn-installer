@@ -34,6 +34,7 @@ apt install -y curl wget unzip jq ufw python3 python3-venv python3-pip git
 # 2. Firewall
 ufw allow 22/tcp
 ufw allow 443/tcp
+ufw allow 8001
 ufw --force enable
 
 # 3. Caddy (самый простой reverse-proxy)
@@ -90,6 +91,7 @@ uvicorn[standard]
 psutil
 httpx
 python-dotenv
+filelock
 EOF
 
 venv/bin/pip install -r requirements.txt
@@ -97,14 +99,15 @@ venv/bin/pip install -r requirements.txt
 # === СОЗДАЁМ agent.py ===
 cat > agent.py << 'EOP'
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
-import psutil
-import subprocess
-import json
-import os
 import asyncio
 import httpx
-from datetime import datetime
+import os
+import json
+import hashlib
+import subprocess
+import psutil
+from filelock import FileLock
+from typing import List
 
 app = FastAPI(title="VPN Agent")
 
@@ -112,114 +115,175 @@ AGENT_SECRET = os.getenv("AGENT_SECRET")
 CENTRAL_API = os.getenv("CENTRAL_API")
 SERVER_ID = os.getenv("SERVER_ID")
 
-class AddUser(BaseModel):
-    uuid: str
+CONFIG_PATH = "/usr/local/etc/xray/config.json"
+LOCK_PATH = "/tmp/xray_config.lock"
 
-# ====================== ЭНДПОИНТЫ ======================
-@app.get("/metrics")
-async def get_metrics(secret: str = Header(..., alias="X-Agent-Secret")):
-    if secret != AGENT_SECRET:
-        raise HTTPException(403)
+SYNC_INTERVAL = 30
+METRICS_INTERVAL = 15
+
+lock = FileLock(LOCK_PATH)
+current_hash = None
+
+
+# ================= CONFIG =================
+
+def load_config():
+    with open(CONFIG_PATH, "r") as f:
+        return json.load(f)
+
+def save_config(config):
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+
+def reload_xray():
+    subprocess.run(["systemctl", "reload", "xray"], check=True)
+
+
+# ================= USERS SYNC =================
+
+async def fetch_desired_users():
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            f"{CENTRAL_API}/api/servers/{SERVER_ID}/desired-users",
+            headers={"X-Agent-Secret": AGENT_SECRET}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+def apply_sync(target_users: List[str]):
+    with lock:
+        config = load_config()
+        clients = config["inbounds"][0]["settings"]["clients"]
+
+        current = {c["id"] for c in clients}
+        target = set(target_users)
+
+        to_add = target - current
+        to_remove = current - target
+
+        if not to_add and not to_remove:
+            return False
+
+        clients = [c for c in clients if c["id"] not in to_remove]
+
+        for uuid in to_add:
+            clients.append({
+                "id": uuid,
+                "flow": "",
+            })
+
+        config["inbounds"][0]["settings"]["clients"] = clients
+        save_config(config)
+
+        reload_xray()
+
+        return True
+
+
+async def sync_loop():
+    global current_hash
+
+    while True:
+        try:
+            data = await fetch_desired_users()
+
+            if data["config_hash"] != current_hash:
+                changed = apply_sync(data["users"])
+
+                if changed:
+                    print("Users synced and Xray reloaded")
+
+                current_hash = data["config_hash"]
+
+        except Exception as e:
+            print("Sync error:", e)
+
+        await asyncio.sleep(SYNC_INTERVAL)
+
+
+# ================= METRICS =================
+
+def collect_metrics():
     cpu = psutil.cpu_percent(interval=1)
     ram = psutil.virtual_memory().percent
     net = psutil.net_io_counters()
-    active = 0
-    try:
-        out = subprocess.check_output(
-            ["xray", "api", "statsquery", "--name", "inbound>>vless-reality>>users"],
-            text=True, timeout=5
-        )
-        active = len(json.loads(out).get("stat", []))
-    except:
-        pass
+
+    active_users = len(get_online_users_internal())
+
     return {
         "cpu": round(cpu, 1),
         "ram": round(ram, 1),
         "network_in_mb": net.bytes_recv // 1024 // 1024,
         "network_out_mb": net.bytes_sent // 1024 // 1024,
-        "active_users": active
+        "active_users": active_users
     }
 
-@app.post("/add_user")
-async def add_user(data: AddUser, secret: str = Header(..., alias="X-Agent-Secret")):
-    if secret != AGENT_SECRET:
-        raise HTTPException(403)
-    cmd = f'xray api adduser --inboundTag="vless-reality" --userId="{data.uuid}"'
-    subprocess.check_output(cmd, shell=True, timeout=10)
-    return {"status": "ok"}
 
-@app.post("/remove_user")
-async def remove_user(data: AddUser, secret: str = Header(..., alias="X-Agent-Secret")):
-    if secret != AGENT_SECRET:
-        raise HTTPException(403)
-    try:
-        cmd = f'xray api removeuser --inboundTag="vless-reality" --userId="{data.uuid}"'
-        subprocess.check_output(cmd, shell=True, timeout=10)
-        return {"status": "ok"}
-    except Exception as e:
-        raise HTTPException(500, str(e))
+async def metrics_loop():
+    while True:
+        try:
+            metrics = collect_metrics()
 
-# === СПИСОК ВСЕХ ДОБАВЛЕННЫХ ПОЛЬЗОВАТЕЛЕЙ ===
-@app.get("/users")
-async def get_all_users(secret: str = Header(..., alias="X-Agent-Secret")):
-    if secret != AGENT_SECRET:
-        raise HTTPException(403)
+            async with httpx.AsyncClient(timeout=15) as client:
+                await client.post(
+                    f"{CENTRAL_API}/api/servers/metrics/ingest?server_id={SERVER_ID}",
+                    json=metrics,
+                    headers={"X-Agent-Secret": AGENT_SECRET}
+                )
+
+        except Exception as e:
+            print("Metrics push error:", e)
+
+        await asyncio.sleep(METRICS_INTERVAL)
+
+
+# ================= ONLINE USERS =================
+
+def get_online_users_internal():
     try:
-        with open("/usr/local/etc/xray/config.json", "r") as f:
-            config = json.load(f)
-        clients = config["inbounds"][0]["settings"]["clients"]
-        uuids = [client["id"] for client in clients]
-        return {"users": uuids}
+        result = subprocess.check_output(
+            ["xray", "api", "statsquery"],
+            text=True,
+            timeout=5
+        )
+        data = json.loads(result)
+        stats = data.get("stat", [])
+
+        online = []
+        for item in stats:
+            name = item.get("name", "")
+            if "user>>>" in name and "online" in name:
+                uuid = name.split(">>>")[1]
+                online.append(uuid)
+
+        return online
+
     except:
-        return {"users": []}
+        return []
 
-# === СПИСОК ОНЛАЙН ===
+
 @app.get("/online")
 async def get_online(secret: str = Header(..., alias="X-Agent-Secret")):
     if secret != AGENT_SECRET:
         raise HTTPException(403)
-    try:
-        result = subprocess.check_output(
-            ["xray", "api", "statsquery", "--name", "inbound>>vless-reality>>users"],
-            text=True, timeout=8
-        )
-        data = json.loads(result)
-        stats = data.get("stat", [])
-        online_uuids = [item["name"].split(">>>")[-1] for item in stats if ">>>" in item.get("name", "")]
-        return {"online_users": online_uuids}
-    except:
-        return {"online_users": []}
 
-@app.post("/update_reality")
-async def update_reality(secret: str = Header(..., alias="X-Agent-Secret")):
-    if secret != AGENT_SECRET:
-        raise HTTPException(403)
-    subprocess.run(["systemctl", "restart", "xray"], check=True)
-    return {"status": "reloaded"}
+    return {"online_users": get_online_users_internal()}
 
-# ====================== ФОНОВАЯ ЗАДАЧА ======================
-async def send_metrics_loop():
-    while True:
-        try:
-            data = await get_metrics(AGENT_SECRET)
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"{CENTRAL_API}/api/servers/metrics/ingest?server_id={SERVER_ID}",
-                    json=data,
-                    headers={"X-Agent-Secret": AGENT_SECRET}
-                )
-        except:
-            pass
-        await asyncio.sleep(15)
+
+# ================= HEALTH =================
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+# ================= STARTUP =================
 
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(send_metrics_loop())
-
-# ====================== ЗАПУСК ======================
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    asyncio.create_task(sync_loop())
+    asyncio.create_task(metrics_loop())
 EOP
 
 # Systemd сервис агента
