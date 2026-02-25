@@ -159,6 +159,37 @@ async def remove_user(data: AddUser, secret: str = Header(..., alias="X-Agent-Se
     except Exception as e:
         raise HTTPException(500, str(e))
 
+# === СПИСОК ВСЕХ ДОБАВЛЕННЫХ ПОЛЬЗОВАТЕЛЕЙ ===
+@app.get("/users")
+async def get_all_users(secret: str = Header(..., alias="X-Agent-Secret")):
+    if secret != AGENT_SECRET:
+        raise HTTPException(403)
+    try:
+        with open("/usr/local/etc/xray/config.json", "r") as f:
+            config = json.load(f)
+        clients = config["inbounds"][0]["settings"]["clients"]
+        uuids = [client["id"] for client in clients]
+        return {"users": uuids}
+    except:
+        return {"users": []}
+
+# === СПИСОК ОНЛАЙН ===
+@app.get("/online")
+async def get_online(secret: str = Header(..., alias="X-Agent-Secret")):
+    if secret != AGENT_SECRET:
+        raise HTTPException(403)
+    try:
+        result = subprocess.check_output(
+            ["xray", "api", "statsquery", "--name", "inbound>>vless-reality>>users"],
+            text=True, timeout=8
+        )
+        data = json.loads(result)
+        stats = data.get("stat", [])
+        online_uuids = [item["name"].split(">>>")[-1] for item in stats if ">>>" in item.get("name", "")]
+        return {"online_users": online_uuids}
+    except:
+        return {"online_users": []}
+
 @app.post("/update_reality")
 async def update_reality(secret: str = Header(..., alias="X-Agent-Secret")):
     if secret != AGENT_SECRET:
