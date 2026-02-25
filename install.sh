@@ -114,7 +114,6 @@ SERVER_ID = os.getenv("SERVER_ID")
 
 class AddUser(BaseModel):
     uuid: str
-    email: str = ""
 
 # ====================== ЭНДПОИНТЫ ======================
 @app.get("/metrics")
@@ -145,7 +144,7 @@ async def get_metrics(secret: str = Header(..., alias="X-Agent-Secret")):
 async def add_user(data: AddUser, secret: str = Header(..., alias="X-Agent-Secret")):
     if secret != AGENT_SECRET:
         raise HTTPException(403)
-    cmd = f'xray api adduser --inboundTag="vless-reality" --userId="{data.uuid}" --email="{data.email}"'
+    cmd = f'xray api adduser --inboundTag="vless-reality" --userId="{data.uuid}"'
     subprocess.check_output(cmd, shell=True, timeout=10)
     return {"status": "ok"}
 
