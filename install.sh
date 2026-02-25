@@ -149,6 +149,17 @@ async def add_user(data: AddUser, secret: str = Header(..., alias="X-Agent-Secre
     subprocess.check_output(cmd, shell=True, timeout=10)
     return {"status": "ok"}
 
+@app.post("/remove_user")
+async def remove_user(data: AddUser, secret: str = Header(..., alias="X-Agent-Secret")):
+    if secret != AGENT_SECRET:
+        raise HTTPException(403)
+    try:
+        cmd = f'xray api removeuser --inboundTag="vless-reality" --userId="{data.uuid}"'
+        subprocess.check_output(cmd, shell=True, timeout=10)
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 @app.post("/update_reality")
 async def update_reality(secret: str = Header(..., alias="X-Agent-Secret")):
     if secret != AGENT_SECRET:
