@@ -547,18 +547,6 @@ EOF
 systemctl daemon-reload
 systemctl enable --now vpn-agent
 
-# 6. Caddyfile (Reality + fallback)
-cat > /etc/caddy/Caddyfile << EOF
-$DOMAIN {
-    reverse_proxy 127.0.0.1:443 {
-        transport http {
-            tls_insecure_skip_verify
-        }
-    }
-}
-EOF
-systemctl restart caddy
-
 # 7. Финальная регистрация
 curl -X POST "$CENTRAL_API/servers/metrics/ingest?server_id=$SERVER_ID" \
   -H "X-Agent-Secret: $AGENT_SECRET" \
