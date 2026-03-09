@@ -161,7 +161,6 @@ psutil
 httpx
 python-dotenv
 filelock
-tempfile
 EOF
 
 venv/bin/pip install -r requirements.txt
