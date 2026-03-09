@@ -547,6 +547,10 @@ EOF
 systemctl daemon-reload
 systemctl enable --now vpn-agent
 
+systemctl restart xray
+sleep 3
+systemctl restart vpn-agent
+
 # 7. Финальная регистрация
 curl -X POST "$CENTRAL_API/servers/metrics/ingest?server_id=$SERVER_ID" \
   -H "X-Agent-Secret: $AGENT_SECRET" \
