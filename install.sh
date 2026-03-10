@@ -425,6 +425,9 @@ class AddUserRequest(BaseModel):
     email: str
     uuid: str
 
+class BootstrapResponse(BaseModel):
+    users: List[AddUserRequest]
+
 class RemoveUserRequest(BaseModel):
     email: str
 
@@ -514,8 +517,79 @@ async def remove_user(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
 
+async def bootstrap_users():
+
+    async with httpx.AsyncClient(timeout=60) as client:
+
+        resp = await client.post(
+            f"{CENTRAL_API}/servers/bootstrap?server_id={SERVER_ID}",
+            headers={"X-Agent-Secret": AGENT_SECRET}
+        )
+
+        if resp.status_code != 200:
+            print("Bootstrap failed:", resp.text)
+            return
+
+        data = BootstrapResponse(**resp.json())
+
+        if not data.users:
+            print("No users to bootstrap")
+            return
+
+        print(f"Bootstrapping {len(data.users)} users")
+
+        await add_users_batch(data.users)
+
+
+async def add_users_batch(users: List[User]):
+    async with api_lock:
+        clients = []
+        for u in users:
+            clients.append({
+                "email": u.email,
+                "id": u.uuid,
+                "flow": FLOW
+            })
+
+        data = {
+            "inbounds": [
+                {
+                    "tag": INBOUND_TAG,
+                    "protocol": PROTOCOL,
+                    "port": PORT,
+                    "settings": {
+                        "decryption": DECRYPTION,
+                        "clients": clients
+                    }
+                }
+            ]
+        }
+
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".json") as temp:
+                json.dump(data, temp)
+                temp_path = temp.name
+            resp = run_xray_api_cmd_end(
+                ["adu", f"--server={API_SERVER}", temp_path]
+            )
+            print(f"Added {len(users)} users")
+        except Exception as e:
+            print("Batch add error:", e)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+
 @app.on_event("startup")
 async def startup_event():
+    print("VPN Agent starting...")
+    
+    try:
+        await bootstrap_users()
+    except Exception as e:
+        print("Bootstrap error:", e)
+        
     asyncio.create_task(metrics_loop())
 
 # Опционально: эндпоинт для ручной проверки метрик
