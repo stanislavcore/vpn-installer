@@ -551,7 +551,7 @@ async def bootstrap_users():
             print("Bootstrap_complete failed:", resp.text)
 
 
-async def add_users_batch(users: List[User]):
+async def add_users_batch(users: List[AddUserRequest]):
     async with api_lock:
         clients = []
         for u in users:
