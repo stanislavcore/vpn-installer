@@ -540,6 +540,16 @@ async def bootstrap_users():
 
         await add_users_batch(data.users)
 
+        resp = await client.post(
+            f"{CENTRAL_API}/servers/bootstrap_complete?server_id={SERVER_ID}",
+            headers={"X-Agent-Secret": AGENT_SECRET}
+        )
+
+        if resp.status_code == 200:
+            print("Bootstrap completed successfully")
+        else:
+            print("Bootstrap_complete failed:", resp.text)
+
 
 async def add_users_batch(users: List[User]):
     async with api_lock:
