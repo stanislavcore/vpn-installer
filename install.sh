@@ -40,6 +40,7 @@ ufw --force enable
 # 4. Xray (VLESS + Reality)
 bash <(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)
 mkdir -p /usr/local/etc/xray
+mkdir -p /var/log/xray
 
 # Базовый config с Reality
 cat > /usr/local/etc/xray/config.json << EOF
@@ -142,6 +143,35 @@ cat > /usr/local/etc/xray/config.json << EOF
 EOF
 
 systemctl enable --now xray
+
+# 4.1. Logrotate для Xray (защита от переполнения)
+cat > /etc/logrotate.d/xray << EOF
+/var/log/xray/*.log {
+    daily
+    missingok
+    rotate 3
+    maxsize 100M
+    compress
+    delaycompress
+    notifempty
+    create 0640 root root
+    sharedscripts
+    postrotate
+        systemctl reload xray > /dev/null 2>&1 || true
+    endscript
+}
+EOF
+
+# 4.2. Ограничение journald (защита systemd логов)
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/size-limit.conf << EOF
+[Journal]
+SystemMaxUse=500M
+SystemMaxFileSize=50M
+RuntimeMaxUse=100M
+EOF
+
+systemctl restart systemd-journald
 
 # 5. Python Agent
 mkdir -p /opt/vpn-agent
